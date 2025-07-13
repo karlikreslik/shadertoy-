@@ -1,0 +1,211 @@
+const vec3 E = vec3(0., .01, 1.);
+
+float t;
+
+mat2 Rm(float a) { 
+    float c = cos(a);
+    float s = sin(a); 
+    return mat2(c, s, -s, c); 
+}
+
+float rep1(float p, float s) { return mod(p, s) - s * 0.5; }
+vec2 rep2(vec2 p, vec2 s) { return mod(p, s) - s * 0.5; }
+vec3 rep3(vec3 p, vec3 s) { return mod(p, s) - s * 0.5; }
+
+float vmax(vec3 v) { return max(max(v.x, v.y), v.z); }
+float vmax(vec2 v) { return max(v.x, v.y); }
+float box3(vec3 p, vec3 s) { return vmax(abs(p) - s); }
+float box2(vec2 p, vec2 s) { return vmax(abs(p) - s); }
+float box1(float p, float s) { return abs(p) - s; }
+
+// Retro sci-fi shapes
+float pyramid(vec3 p, float h) {
+    float size = h * 0.5;
+    return max(
+        abs(p.y) - h,
+        max(abs(p.x) + abs(p.z) - size, p.y)
+    );
+}
+
+float cylinder(vec3 p, float r, float h) {
+    return max(
+        length(p.xz) - r,
+        abs(p.y) - h
+    );
+}
+
+float dome(vec3 p, float r) {
+    p.y += r;
+    return length(p) - r;
+}
+
+float retroTower(vec3 p) {
+    float d = 1e6;
+    
+    // Base
+    d = min(d, box3(p, vec3(3.0, 1.0, 3.0)));
+    
+    // Middle section
+    d = min(d, cylinder(p - vec3(0, 2.0, 0), 1.5, 4.0));
+    
+    // Top (pyramid)
+    d = min(d, pyramid(p - vec3(0, 7.0, 0), 3.0));
+    
+    // Antenna
+    d = min(d, cylinder(p - vec3(0, 11.0, 0), 0.1, 2.0));
+    
+    return d;
+}
+
+float factory(vec3 p) {
+    float d = 1e6;
+    
+    // Main building
+    d = min(d, box3(p, vec3(8.0, 4.0, 6.0)));
+    
+    // Chimneys
+    d = min(d, cylinder(p - vec3(5.0, 6.0, 0), 0.8, 6.0));
+    d = min(d, cylinder(p - vec3(-5.0, 6.0, 0), 0.8, 6.0));
+    
+    // Tower
+    d = min(d, box3(p - vec3(0, 8.0, 0), vec3(2.0, 4.0, 2.0)));
+    d = min(d, dome(p - vec3(0, 13.0, 0), 2.0));
+    
+    return d;
+}
+
+float sciFiBuilding(vec3 p, float flr) {
+    float h = flr * 4.0;
+    
+    // Main tower
+    float d = box3(p, vec3(5.0, h, 5.0));
+    
+    // Pyramid top
+    d = min(d, pyramid(p - vec3(0, h + 1.5, 0), 3.0));
+    
+    // Side towers
+    d = min(d, box3(p - vec3(7.0, 0, 0), vec3(2.0, h * 0.8, 2.0)));
+    d = min(d, box3(p - vec3(-7.0, 0, 0), vec3(2.0, h * 0.8, 2.0)));
+    
+    // Landing pads
+    d = min(d, box3(p - vec3(0, h * 0.5, 8.0), vec3(8.0, 0.5, 2.0)));
+    d = min(d, box3(p - vec3(0, h * 0.5, -8.0), vec3(8.0, 0.5, 2.0)));
+    
+    return d;
+}
+
+// Distance function
+float map(vec3 p) {
+    float d = p.y + 1.0; // Ground plane
+    
+    // Building grid
+    vec2 grid = floor(p.xz / 20.0);
+    vec3 localPos = p - vec3(grid.x * 20.0, 0, grid.y * 20.0);
+    localPos.xz = rep2(localPos.xz, vec2(18.0));
+    
+    // Random building assignment (FIXED - proper closing parenthesis)
+    float rnd = fract(sin(dot(grid, vec2(12.9898, 78.233))) * 43758.5453);
+    
+    if (rnd < 0.3) {
+        d = min(d, retroTower(localPos - vec3(0, 1.0, 0)));
+    } else if (rnd < 0.6) {
+        d = min(d, factory(localPos - vec3(0, 1.0, 0)));
+    } else {
+        d = min(d, sciFiBuilding(localPos - vec3(0, 1.0, 0), 3.0 + 3.0 * rnd));
+    }
+    
+    return d;
+}
+
+// Ray tracing function
+float trace(vec3 o, vec3 d, float maxDist) {
+    float t = 0.0;
+    for(int i = 0; i < 64; i++) {
+        vec3 p = o + d * t;
+        float dist = map(p);
+        if(dist < 0.01 || t > maxDist) break;
+        t += dist * 0.9;
+    }
+    return t;
+}
+
+// Retro normal calculation
+vec3 calcNormal(vec3 p) {
+    vec2 e = vec2(0.1, 0.0);
+    return normalize(vec3(
+        map(p + e.xyy) - map(p - e.xyy),
+        map(p + e.yxy) - map(p - e.yxy),
+        map(p + e.yyx) - map(p - e.yyx)
+    ));
+}
+
+// Retro color palette
+vec3 getColor(float id) {
+    id = fract(id) * 16.0;
+    if (id < 1.0) return vec3(0.0, 0.0, 0.0);      // Black
+    if (id < 2.0) return vec3(0.2, 0.2, 0.6);      // Dark blue
+    if (id < 3.0) return vec3(0.6, 0.2, 0.2);      // Dark red
+    if (id < 4.0) return vec3(0.2, 0.6, 0.2);      // Dark green
+    if (id < 5.0) return vec3(0.4, 0.4, 0.8);      // Medium blue
+    if (id < 6.0) return vec3(0.8, 0.4, 0.4);      // Medium red
+    if (id < 7.0) return vec3(0.4, 0.8, 0.4);      // Medium green
+    if (id < 8.0) return vec3(0.8, 0.8, 0.2);      // Yellow
+    if (id < 9.0) return vec3(0.6, 0.6, 1.0);      // Light blue
+    if (id < 10.0) return vec3(1.0, 0.6, 0.6);     // Pink
+    if (id < 11.0) return vec3(0.6, 1.0, 0.6);     // Light green
+    if (id < 12.0) return vec3(1.0, 1.0, 0.6);     // Light yellow
+    if (id < 13.0) return vec3(0.8, 0.8, 0.8);     // Gray
+    if (id < 14.0) return vec3(1.0, 0.8, 0.2);     // Orange
+    if (id < 15.0) return vec3(0.4, 0.8, 0.8);     // Turquoise
+    return vec3(1.0, 1.0, 1.0);                    // White
+}
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    // Retro resolution
+    vec2 uv = (fragCoord * 2.0 - iResolution.xy) / iResolution.y;
+    
+    t = iTime;
+    
+    // Camera
+    vec3 O = vec3(0.0, 15.0, -30.0);
+    vec3 D = normalize(vec3(uv, 1.5));
+    D.xz *= Rm(t * 0.2);
+    
+    // Raymarching
+    float L = 100.0;
+    float l = trace(O, D, L);
+    vec3 p = O + D * l;
+    
+    // Materials and lighting
+    vec3 col = vec3(0.0);
+    if (l < L) {
+        vec3 n = calcNormal(p);
+        vec3 lightDir = normalize(vec3(0.6, 0.8, 0.4));
+        float diff = max(0.0, dot(n, lightDir));
+        float ao = 1.0 - (l / L) * 0.5;
+        
+        float materialId = sin(p.x * 0.5) + cos(p.z * 0.5) + sin(p.y * 0.3);
+        col = getColor(materialId) * diff * ao;
+    } else {
+        // Sky
+        col = mix(vec3(0.2, 0.3, 0.6), vec3(0.8, 0.5, 0.3), uv.y * 0.5 + 0.5);
+    }
+    
+    // CRT effects
+    float scanline = sin(fragCoord.y * 3.1415) * 0.1 + 0.9;
+    col *= scanline;
+    
+    vec2 vuv = fragCoord / iResolution.xy;
+    float vignette = 1.0 - smoothstep(0.7, 1.0, length(vuv - 0.5));
+    col *= vignette;
+    
+    // Pixelation
+    vec2 pixelUV = floor(fragCoord / 8.0) * 8.0;
+    float dither = fract(sin(dot(pixelUV, vec2(12.9898, 78.233))) * 43758.5453);
+    col += (dither - 0.5) * 0.1;
+    
+    // Retro gamma
+    col = pow(col, vec3(1.0 / 1.8));
+    
+    fragColor = vec4(col, 1.0);
+}
