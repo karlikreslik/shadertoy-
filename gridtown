@@ -1,0 +1,252 @@
+// Hlavička shaderu pro Shadertoy nebo podobné prostředí
+// uniform vec3 iResolution; // Rozlišení obrazovky
+// uniform float iTime;     // Čas pro animace
+
+// Zde definujeme uniformy, které budou poskytovány zvenčí
+// Pro jednoduchost budu předpokládat Shadertoy konvence
+// (iResolution a iTime jsou automaticky dostupné)
+
+// --- Pomocné funkce ---
+
+// Matice rotace pro rotaci kamery nebo objektů
+mat2 Rm(float a) {
+    float c = cos(a);
+    float s = sin(a);
+    return mat2(c, s, -s, c);
+}
+
+// Opakování (tiling) pro vytváření mřížek nebo opakujících se vzorů
+float rep1(float p, float s) { return mod(p, s) - s * 0.5; }
+vec2 rep2(vec2 p, vec2 s) { return mod(p, s) - s * 0.5; }
+vec3 rep3(vec3 p, vec3 s) { return mod(p, s) - s * 0.5; }
+
+// Vrací největší složku vektoru (pro box SDF)
+float vmax(vec3 v) { return max(max(v.x, v.y), v.z); }
+
+// SDF pro krabici (box)
+float sdBox(vec3 p, vec3 s) { return vmax(abs(p) - s); }
+
+// Hladké minimum (pro spojování objektů bez ostrých hran)
+float smin(float a, float b, float k) {
+    float h = max(k - abs(a - b), 0.0) / k;
+    return min(a, b) - h * h * k * (1.0 / 4.0);
+}
+
+// --- Funkce pro definici scény (Distance Field) ---
+
+// Typ povrchu (pro barvení)
+#define MATERIAL_NONE -1.0
+#define MATERIAL_GROUND 0.0
+#define MATERIAL_BUILDING 1.0
+#define MATERIAL_RIVER 2.0
+
+// Globální proměnná pro uložení typu materiálu
+float g_materialType = MATERIAL_NONE;
+
+// Hlavní funkce definující scénu
+float map(vec3 p) {
+    g_materialType = MATERIAL_NONE; // Reset typu materiálu pro každý bod
+
+    // --- Terén (základní rovina) ---
+    float groundDist = p.y; // Rovná zem na y=0
+    
+    // --- Budovy (jednoduchá mřížka krabic) ---
+    vec3 pBuildings = p;
+    // Opakujeme budovy v mřížce
+    vec2 cell = floor(pBuildings.xz / 20.0); // ID buňky
+    pBuildings.xz = rep2(pBuildings.xz, vec2(20.0, 20.0)); // Opakování pozice v buňce
+
+    // Různá výška budov na základě ID buňky (zde jen jednoduché ID)
+    float buildingHeight = 5.0 + mod(cell.x + cell.y, 3.0) * 3.0;
+    vec3 buildingSize = vec3(8.0, buildingHeight, 8.0);
+    float buildingDist = sdBox(pBuildings - vec3(0.0, buildingHeight * 0.5, 0.0), buildingSize);
+
+    // --- Řeka (jednoduchý pruh) ---
+    // Zkusíme vytvořit zjednodušený "pruh" řeky
+    float riverWidth = 30.0;
+    float riverDepth = 2.0;
+    // Pozice řeky - uděláme ji trochu zvlněnou v Z směru
+    float riverZOffset = sin(p.x * 0.05 + iTime * 0.1) * 10.0; // Přidán pohyb
+    float riverDist = sdBox(p - vec3(0.0, -riverDepth * 0.5, riverZOffset), vec3(1000.0, riverDepth * 0.5, riverWidth * 0.5));
+    // Zvedneme ji o kousek, aby byla pod úrovní země
+    riverDist = max(riverDist, p.y + 0.1); // Řeka je pod zemí a má svou hladinu
+
+    // Kombinujeme objekty
+    float d = groundDist; // Začneme se zemí
+    d = smin(d, buildingDist, 2.0); // Přidáme budovy se zaoblenými spoji
+    d = smin(d, riverDist, 5.0); // Přidáme řeku
+
+    // Zde nastavíme typ materiálu na základě toho, který objekt je nejblíže
+    // Toto je velmi zjednodušené a v reálném kódu by se to dělalo sofistikovaněji
+    // Je nutné mapovat na "aktuální" vzdálenost, ne na d. Původní kód to dělal trochu chybně.
+    // Musíme porovnat aktuální d s vzdálenostmi k jednotlivým objektům.
+    float currentMinDist = d; // To je naše finální vzdálenost od map funkce
+
+    if (abs(currentMinDist - groundDist) < 0.001) g_materialType = MATERIAL_GROUND;
+    else if (abs(currentMinDist - buildingDist) < 0.001) g_materialType = MATERIAL_BUILDING;
+    else if (abs(currentMinDist - riverDist) < 0.001) g_materialType = MATERIAL_RIVER;
+
+    return d;
+}
+
+// --- Ray Marching ---
+
+// Maximální vzdálenost, kam paprsek dojde
+const float MAX_DIST = 500.0;
+// Přesnost, jak blízko musíme být k povrchu
+const float HIT_PRECISION = 0.005;
+// Maximální počet kroků raymarchingu
+const int MAX_STEPS = 100;
+
+float trace(vec3 ro, vec3 rd) {
+    float t = 0.0;
+    for (int i = 0; i < MAX_STEPS; i++) {
+        vec3 p = ro + rd * t;
+        float dist = map(p);
+        if (dist < HIT_PRECISION || t > MAX_DIST) break;
+        t += dist;
+    }
+    return t;
+}
+
+// --- Výpočet normály (pro osvětlení) ---
+vec3 calcNormal(vec3 p) {
+    vec2 e = vec2(0.001, 0.0);
+    return normalize(vec3(
+        map(p + e.xyy) - map(p - e.xyy),
+        map(p + e.yxy) - map(p - e.yxy),
+        map(p + e.yyx) - map(p - e.yyx)
+    ));
+}
+
+// --- Barvení materiálů ---
+vec3 getMaterialColor(float materialType, vec3 p, vec3 n) {
+    vec3 col = vec3(0.0);
+
+    if (materialType == MATERIAL_GROUND) {
+        col = vec3(0.3, 0.4, 0.2); // Zelená pro zem
+        // Jednoduchý "cestovní" vzor
+        if (abs(rep1(p.x, 20.0)) < 2.0 || abs(rep1(p.z, 20.0)) < 2.0) {
+            col = mix(col, vec3(0.4, 0.3, 0.2), 0.5); // Šedohnědé "cesty"
+        }
+    } else if (materialType == MATERIAL_BUILDING) {
+        // Různé barvy budov
+        vec2 cell = floor(p.xz / 20.0);
+        float randVal = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
+
+        if (randVal < 0.33) col = vec3(0.6, 0.2, 0.1); // Červené střechy/cihly
+        else if (randVal < 0.66) col = vec3(0.5, 0.5, 0.5); // Šedé budovy
+        else col = vec3(0.3, 0.3, 0.4); // Modro-šedé budovy
+
+        // Naznačení oken (světlo zevnitř) - nyní více výrazné
+        float windowPatternY = fract(p.y * 0.5);
+        float windowPatternX = fract(p.x * 0.5);
+        float windowPatternZ = fract(p.z * 0.5);
+        if (abs(windowPatternY - 0.5) < 0.1 && (abs(windowPatternX - 0.5) < 0.2 || abs(windowPatternZ - 0.5) < 0.2)) {
+             col += vec3(1.0, 0.7, 0.2) * 0.2; // Malé žluté "rozsvícené" okénko (zvýšeno z 0.1 na 0.2)
+        }
+
+    } else if (materialType == MATERIAL_RIVER) {
+        col = vec3(0.1, 0.2, 0.4); // Tmavě modrá pro vodu
+        // Můžeme přidat jednoduché vlny nebo lesk
+        float wave = sin(p.x * 0.2 + iTime * 0.5) * sin(p.z * 0.3 + iTime * 0.4) * 0.05;
+        // Odlesk je nyní silnější pro lesklejší vodu
+        col = mix(col, vec3(0.5, 0.8, 1.0), pow(abs(dot(n, normalize(vec3(0.0, 1.0, 0.0)))) + wave, 8.0)); // Změna z 5.0 na 8.0
+    }
+
+    return col;
+}
+
+// --- Osvětlení ("Zlatá Hodinka") ---
+vec3 lightDir = normalize(vec3(-0.8, 0.3, 0.5)); // Směr slunce (nízko nad obzorem)
+vec3 lightColor = vec3(1.0, 0.7, 0.4) * 2.0; // Teplá barva slunce
+
+vec3 calculateLighting(vec3 p, vec3 n, vec3 rd, vec3 materialColor, float rayLength) {
+    vec3 finalColor = materialColor;
+
+    // Ambientní světlo - ZVÝŠENO
+    finalColor *= 0.3; // Zvýšeno z 0.2
+
+    // Difúzní světlo od slunce - ZVÝŠENO
+    float diff = max(0.0, dot(n, lightDir));
+    finalColor += materialColor * lightColor * diff * 1.5; // Zvýšeno z 1.0 na 1.5
+
+    // Jednoduché stíny (velmi primitivní) - Můžeme zmírnit sílu stínu
+    float shadowStrength = 0.4; // Změněno z 0.5 na 0.4 pro světlejší stíny
+    float shadow = trace(p + n * 0.01, lightDir);
+    if (shadow < MAX_DIST - HIT_PRECISION) { // Paprsek trefil něco před koncem scény
+        finalColor *= (1.0 - shadowStrength); // Ztmavení stínu
+    }
+
+    // Spekulární odlesky - ZVÝŠENÁ SÍLA A OSTROST
+    vec3 r = reflect(rd, n);
+    float spec = pow(max(0.0, dot(r, lightDir)), 32.0); // Zvýšen exponent pro ostřejší lesky
+    finalColor += lightColor * spec * 0.8; // Zvýšena síla lesku
+
+    return finalColor;
+}
+
+// --- Atmosféra / Mlha ---
+vec3 skyColor(vec3 d) {
+    // Gradient oblohy (oranžová/fialová k modré)
+    vec3 horizonColor = vec3(1.0, 0.5, 0.1); // Oranžová u horizontu
+    vec3 zenithColor = vec3(0.2, 0.3, 0.6); // Modrá/fialová nahoře
+    vec3 s = mix(horizonColor, zenithColor, smoothstep(-0.2, 0.8, d.y));
+
+    // Přidáme náznak sluneční záře
+    s += lightColor * pow(max(0.0, dot(d, lightDir)), 20.0) * 1.5;
+    return s;
+}
+
+// Funkce pro aplikaci mlhy - HLAVNÍ ZMĚNY ZDE!
+vec3 applyFog(vec3 col, float rayLength, vec3 rayDirection) {
+    vec3 fogColor = skyColor(rayDirection); // Barva mlhy je barva oblohy
+    // Změnili jsme rozsah smoothstepu pro méně hustou mlhu v popředí
+    // Mlha se začíná zahušťovat dál (od 40% MAX_DIST) a je plná až na 90% MAX_DIST
+    float fogFactor = smoothstep(MAX_DIST * 0.4, MAX_DIST * 0.9, rayLength);
+    return mix(col, fogColor, fogFactor);
+}
+
+// --- Hlavní funkce Shadertoy ---
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 uv = (fragCoord * 2.0 - iResolution.xy) / iResolution.y;
+
+    // --- Nastavení kamery (aerial view) ---
+    // Kamera bude nahoře, koukat dolů a trochu do dálky
+    vec3 ro = vec3(200.0, 150.0, 200.0); // Pozice oka (ro = ray origin)
+    vec3 target = vec3(0.0, 0.0, 0.0); // Bod, na který se díváme
+    vec3 up = vec3(0.0, 1.0, 0.0); // Vektor "nahoru"
+
+    // Vytvoření souřadného systému kamery
+    vec3 forward = normalize(target - ro);
+    vec3 right = normalize(cross(forward, up));
+    vec3 newUp = normalize(cross(right, forward));
+
+    // Paprsek (ray direction)
+    // ovlivněno UV souřadnicemi a maticí kamery
+    vec3 rd = normalize(forward + uv.x * right * 1.5 + uv.y * newUp * 0.8); // 1.5 a 0.8 pro širší zorné pole
+
+    // Ray marching
+    float t = trace(ro, rd);
+
+    vec3 finalColor;
+
+    if (t >= MAX_DIST - HIT_PRECISION) { // Paprsek nic netrefil, je to obloha
+        finalColor = skyColor(rd);
+    } else { // Paprsek trefil povrch
+        vec3 p = ro + rd * t; // Bod dopadu
+        vec3 n = calcNormal(p); // Normála povrchu v bodě dopadu
+
+        // Získat barvu materiálu v bodě dopadu
+        vec3 materialColor = getMaterialColor(g_materialType, p, n);
+
+        // Aplikovat osvětlení
+        finalColor = calculateLighting(p, n, rd, materialColor, t);
+    }
+
+    // Aplikovat mlhu na celou scénu
+    finalColor = applyFog(finalColor, t, rd);
+
+    // Tone mapping a gamma korekce (pro lepší vzhled)
+    fragColor = vec4(sqrt(finalColor), 1.0); // sqrt pro gamma 2.0
+}
